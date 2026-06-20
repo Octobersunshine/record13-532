@@ -26,6 +26,10 @@ func TestClassify(t *testing.T) {
 		{"SET NAMES utf8mb4", Write},
 		{"BEGIN", Write},
 		{"START TRANSACTION", Write},
+		{"COMMIT", Write},
+		{"ROLLBACK", Write},
+		{"SAVEPOINT sp1", Write},
+		{"RELEASE SAVEPOINT sp1", Write},
 
 		{"", Unknown},
 		{"   ", Unknown},

@@ -25,7 +25,8 @@ func Classify(sql string) SQLType {
 		return Read
 	case "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER",
 		"DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE", "LOCK",
-		"UNLOCK", "SET", "CALL", "BEGIN", "START":
+		"UNLOCK", "SET", "CALL", "BEGIN", "START", "COMMIT",
+		"ROLLBACK", "SAVEPOINT", "RELEASE":
 		return Write
 	default:
 		return Unknown

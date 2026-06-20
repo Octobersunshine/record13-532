@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"sqlrouter/router"
@@ -19,14 +21,38 @@ type ColumnInfo struct {
 }
 
 type QueryResponse struct {
-	OK      bool         `json:"ok"`
-	Type    string       `json:"type,omitempty"`
-	Target  string       `json:"target,omitempty"`
-	Columns []ColumnInfo `json:"columns,omitempty"`
-	Rows    []map[any]any `json:"rows,omitempty"`
-	RowsAffected int64   `json:"rows_affected,omitempty"`
-	LastInsertID int64   `json:"last_insert_id,omitempty"`
-	Error   string       `json:"error,omitempty"`
+	OK           bool         `json:"ok"`
+	Type         string       `json:"type,omitempty"`
+	Target       string       `json:"target,omitempty"`
+	Columns      []ColumnInfo `json:"columns,omitempty"`
+	Rows         []map[string]any `json:"rows,omitempty"`
+	RowsAffected int64        `json:"rows_affected,omitempty"`
+	LastInsertID int64        `json:"last_insert_id,omitempty"`
+	Error        string       `json:"error,omitempty"`
+}
+
+type TxStatement struct {
+	SQL    string `json:"sql"`
+	Params []any  `json:"params,omitempty"`
+}
+
+type TxRequest struct {
+	Statements []TxStatement `json:"statements"`
+}
+
+type TxResult struct {
+	Type         string            `json:"type"`
+	Columns      []ColumnInfo      `json:"columns,omitempty"`
+	Rows         []map[string]any  `json:"rows,omitempty"`
+	RowsAffected int64             `json:"rows_affected,omitempty"`
+	LastInsertID int64             `json:"last_insert_id,omitempty"`
+}
+
+type TxResponse struct {
+	OK       bool       `json:"ok"`
+	Target   string     `json:"target,omitempty"`
+	Results  []TxResult `json:"results,omitempty"`
+	Error    string     `json:"error,omitempty"`
 }
 
 func Query(rtr *router.Router) http.HandlerFunc {
@@ -73,7 +99,7 @@ func Query(rtr *router.Router) http.HandlerFunc {
 			}
 			defer rows.Close()
 
-			cols, err := rows.ColumnTypes()
+			colInfos, result, err := scanRows(rows)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, QueryResponse{
 					OK:    false,
@@ -81,33 +107,6 @@ func Query(rtr *router.Router) http.HandlerFunc {
 					Error: err.Error(),
 				})
 				return
-			}
-
-			colInfos := make([]ColumnInfo, len(cols))
-			for i, c := range cols {
-				colInfos[i] = ColumnInfo{Name: c.Name(), Type: c.DatabaseTypeName()}
-			}
-
-			var result []map[any]any
-			for rows.Next() {
-				values := make([]any, len(cols))
-				ptrs := make([]any, len(cols))
-				for i := range values {
-					ptrs[i] = &values[i]
-				}
-				if err := rows.Scan(ptrs...); err != nil {
-					writeJSON(w, http.StatusInternalServerError, QueryResponse{
-						OK:    false,
-						Type:  typeStr,
-						Error: err.Error(),
-					})
-					return
-				}
-				row := make(map[any]any)
-				for i, c := range colInfos {
-					row[c.Name] = values[i]
-				}
-				result = append(result, row)
 			}
 
 			writeJSON(w, http.StatusOK, QueryResponse{
@@ -146,6 +145,163 @@ func Query(rtr *router.Router) http.HandlerFunc {
 			})
 		}
 	}
+}
+
+func Tx(rtr *router.Router) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, TxResponse{
+				OK:    false,
+				Error: "method not allowed, use POST",
+			})
+			return
+		}
+
+		var req TxRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, TxResponse{
+				OK:    false,
+				Error: "invalid request body: " + err.Error(),
+			})
+			return
+		}
+
+		if len(req.Statements) == 0 {
+			writeJSON(w, http.StatusBadRequest, TxResponse{
+				OK:    false,
+				Error: "at least one statement is required",
+			})
+			return
+		}
+
+		tx, err := rtr.BeginTx(r.Context(), nil)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, TxResponse{
+				OK:    false,
+				Error: "begin transaction failed: " + err.Error(),
+			})
+			return
+		}
+
+		var results []TxResult
+		success := false
+		defer func() {
+			if !success {
+				tx.Rollback()
+			}
+		}()
+
+		for i, stmt := range req.Statements {
+			if stmt.SQL == "" {
+				writeJSON(w, http.StatusBadRequest, TxResponse{
+					OK:    false,
+					Error: fmt.Sprintf("statement[%d]: sql is empty", i),
+				})
+				return
+			}
+
+			sqlType := sqltype.Classify(stmt.SQL)
+			typeStr := typeString(sqlType)
+
+			switch sqlType {
+			case sqltype.Read:
+				rows, err := tx.Query(r.Context(), stmt.SQL, stmt.Params...)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, TxResponse{
+						OK:    false,
+						Error: fmt.Sprintf("statement[%d]: %s", i, err.Error()),
+					})
+					return
+				}
+				colInfos, result, err := scanRows(rows)
+				rows.Close()
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, TxResponse{
+						OK:    false,
+						Error: fmt.Sprintf("statement[%d]: %s", i, err.Error()),
+					})
+					return
+				}
+				results = append(results, TxResult{
+					Type:    typeStr,
+					Columns: colInfos,
+					Rows:    result,
+				})
+
+			case sqltype.Write:
+				res, err := tx.Exec(r.Context(), stmt.SQL, stmt.Params...)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, TxResponse{
+						OK:    false,
+						Error: fmt.Sprintf("statement[%d]: %s", i, err.Error()),
+					})
+					return
+				}
+				affected, _ := res.RowsAffected()
+				lastID, _ := res.LastInsertId()
+				results = append(results, TxResult{
+					Type:         typeStr,
+					RowsAffected: affected,
+					LastInsertID: lastID,
+				})
+
+			default:
+				writeJSON(w, http.StatusBadRequest, TxResponse{
+					OK:    false,
+					Error: fmt.Sprintf("statement[%d]: cannot determine SQL type", i),
+				})
+				return
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, TxResponse{
+				OK:    false,
+				Error: "commit failed: " + err.Error(),
+			})
+			return
+		}
+		success = true
+
+		writeJSON(w, http.StatusOK, TxResponse{
+			OK:      true,
+			Target:  "master",
+			Results: results,
+		})
+	}
+}
+
+func scanRows(rows *sql.Rows) ([]ColumnInfo, []map[string]any, error) {
+	cols, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	colInfos := make([]ColumnInfo, len(cols))
+	for i, c := range cols {
+		colInfos[i] = ColumnInfo{Name: c.Name(), Type: c.DatabaseTypeName()}
+	}
+
+	var result []map[string]any
+	for rows.Next() {
+		values := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, nil, err
+		}
+		row := make(map[string]any)
+		for i, c := range colInfos {
+			row[c.Name] = values[i]
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return colInfos, result, nil
 }
 
 func typeString(t sqltype.SQLType) string {

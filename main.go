@@ -47,6 +47,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/query", handler.Query(rtr))
+	mux.HandleFunc("/query/tx", handler.Tx(rtr))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("sql-router listening on %s", addr)
