@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 
 	"sqlrouter/router"
 	"sqlrouter/sqltype"
+	"sqlrouter/stats"
 )
 
 type QueryRequest struct {
@@ -312,6 +315,35 @@ func typeString(t sqltype.SQLType) string {
 		return "write"
 	default:
 		return "unknown"
+	}
+}
+
+func Stats(coll *stats.Collector) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		topN := 10
+		if v := r.URL.Query().Get("top"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				topN = n
+			}
+		}
+
+		if r.URL.Query().Get("reset") == "1" {
+			coll.Reset()
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":      true,
+				"message": "stats reset",
+			})
+			return
+		}
+
+		if v := r.URL.Query().Get("slow_threshold"); v != "" {
+			if d, err := strconv.Atoi(v); err == nil && d > 0 {
+				coll.SetSlowThreshold(time.Duration(d) * time.Millisecond)
+			}
+		}
+
+		summary := coll.Summary(topN)
+		writeJSON(w, http.StatusOK, summary)
 	}
 }
 

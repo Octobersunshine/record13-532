@@ -7,19 +7,22 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"sqlrouter/db"
 	"sqlrouter/handler"
 	"sqlrouter/router"
+	"sqlrouter/stats"
 )
 
 type Config struct {
-	MasterDSN string   `json:"master_dsn"`
-	SlaveDSNs []string `json:"slave_dsns"`
-	MaxOpen   int      `json:"max_open_conns"`
-	MaxIdle   int      `json:"max_idle_conns"`
-	MaxLife   int      `json:"max_conn_life_seconds"`
-	Port      int      `json:"port"`
+	MasterDSN     string   `json:"master_dsn"`
+	SlaveDSNs     []string `json:"slave_dsns"`
+	MaxOpen       int      `json:"max_open_conns"`
+	MaxIdle       int      `json:"max_idle_conns"`
+	MaxLife       int      `json:"max_conn_life_seconds"`
+	Port          int      `json:"port"`
+	SlowThreshold int      `json:"slow_threshold_ms"`
 }
 
 func main() {
@@ -43,11 +46,17 @@ func main() {
 	}
 	defer pool.Close()
 
-	rtr := router.New(pool)
+	coll := stats.NewCollector()
+	if cfg.SlowThreshold > 0 {
+		coll.SetSlowThreshold(time.Duration(cfg.SlowThreshold) * time.Millisecond)
+	}
+
+	rtr := router.New(pool, coll)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/query", handler.Query(rtr))
 	mux.HandleFunc("/query/tx", handler.Tx(rtr))
+	mux.HandleFunc("/stats", handler.Stats(coll))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("sql-router listening on %s", addr)

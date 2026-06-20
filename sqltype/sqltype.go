@@ -36,6 +36,17 @@ func Classify(sql string) SQLType {
 func IsRead(sql string) bool  { return Classify(sql) == Read }
 func IsWrite(sql string) bool { return Classify(sql) == Write }
 
+func String(t SQLType) string {
+	switch t {
+	case Read:
+		return "read"
+	case Write:
+		return "write"
+	default:
+		return "unknown"
+	}
+}
+
 func extractFirstWord(s string) string {
 	var b strings.Builder
 	for _, r := range s {
